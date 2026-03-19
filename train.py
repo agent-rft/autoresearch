@@ -566,7 +566,13 @@ class MuonAdamW(torch.optim.Optimizer):
             )
 
     def _step_muon(self, group):
-        params = [p for p in group["params"] if p.grad is not None]
+        params = group["params"]
+        if not params:
+            return
+        none_grad = [f"{i}:{p.shape}" for i, p in enumerate(params) if p.grad is None]
+        if none_grad:
+            print(f"WARNING: None grads: {none_grad}")
+        params = [p for p in params if p.grad is not None]
         if not params:
             return
         p = params[0]
