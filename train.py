@@ -129,7 +129,7 @@ class CausalSelfAttention(nn.Module):
         return y
 
 
-NUM_EXPERTS = 8
+NUM_EXPERTS = 4
 NUM_SELECTED_EXPERTS = 2
 MLP_EXPAND = 4
 
@@ -651,7 +651,7 @@ FINAL_LR_FRAC = 0.0  # final LR as fraction of initial
 
 # Model size
 DEPTH = 8  # number of transformer layers
-DEVICE_BATCH_SIZE = 128  # per-device batch size (reduce if OOM)
+DEVICE_BATCH_SIZE = 16  # per-device batch size (reduce if OOM)
 
 # ---------------------------------------------------------------------------
 # Setup: tokenizer, model, optimizer, dataloader
