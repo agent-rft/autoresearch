@@ -1,26 +1,21 @@
 """
-Vision-Language training on space-multimodal-dataset.
-Architecture: Vision Encoder + Multimodal Transformer Decoder.
-Multiple vision encoder experiments: CNN, ViT, Hybrid, ResNet.
+Finish the finetune experiments that crashed.
+Reuses the train_vlm function from train_vision.py.
 """
 
 import os
+import gc
 
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 
-import gc
-import io
-import math
-import time
 import numpy as np
-from PIL import Image
-import requests
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
+from PIL import Image
+import io
 
 device = torch.device("cuda")
 torch.manual_seed(42)
@@ -29,43 +24,16 @@ torch.set_float32_matmul_precision("high")
 
 IMG_SIZE = 224
 
-# ---------------------------------------------------------------------------
-# Dataset
-# ---------------------------------------------------------------------------
-
-
-def load_space_dataset():
-    try:
-        from datasets import load_dataset
-
-        ds = load_dataset("AIOmarRehan/space-multimodal-dataset", split="train")
-        print(f"Loaded dataset: {len(ds)} samples")
-        return ds
-    except ImportError:
-        return None
-
 
 class SpaceVLMDataset(Dataset):
     def __init__(self, split="train", img_size=IMG_SIZE):
         self.img_size = img_size
         self.split = split
+        from datasets import load_dataset
 
-        try:
-            from datasets import load_dataset
-
-            self.ds = load_dataset("AIOmarRehan/space-multimodal-dataset", split=split)
-            self.use_hf = True
-            print(f"Loaded HF dataset: {len(self.ds)} samples")
-        except Exception as e:
-            self.use_hf = False
-            print(f"Using mock dataset: {e}")
-            self.ds = [
-                {
-                    "text": f"Satellite image description {i} of space showing celestial bodies.",
-                    "image": None,
-                }
-                for i in range(250)
-            ]
+        self.ds = load_dataset("AIOmarRehan/space-multimodal-dataset", split=split)
+        self.use_hf = True
+        print(f"Loaded HF dataset: {len(self.ds)} samples")
 
     def _normalize_image(self, img):
         if img is None:
@@ -96,11 +64,6 @@ class SpaceVLMDataset(Dataset):
         return img_tensor, text
 
 
-# ---------------------------------------------------------------------------
-# Vision Encoders
-# ---------------------------------------------------------------------------
-
-
 class ConvBlock(nn.Module):
     def __init__(self, in_ch, out_ch, stride=1):
         super().__init__()
@@ -125,9 +88,7 @@ class CNNEncoder(nn.Module):
         layers = [ConvBlock(ch[i], ch[i + 1], stride=2) for i in range(4)]
         self.net = nn.Sequential(*layers)
         self.pool = nn.AdaptiveAvgPool2d((4, 4))
-        self.proj = nn.Sequential(
-            nn.Linear(512, embed_dim),
-        )
+        self.proj = nn.Sequential(nn.Linear(512, embed_dim))
         self.num_patches = 16
         self.cls = nn.Parameter(torch.zeros(1, 1, embed_dim))
         nn.init.normal_(self.cls, std=0.02)
@@ -163,7 +124,6 @@ class SimpleViT(nn.Module):
         self.norm = nn.LayerNorm(embed_dim)
         self.cls = nn.Parameter(torch.zeros(1, 1, embed_dim))
         nn.init.normal_(self.cls, std=0.02)
-        self.num_patches = self.num_patches
 
     def forward(self, x):
         B = x.size(0)
@@ -253,11 +213,6 @@ def build_encoder(vision_type, embed_dim, img_size):
         raise ValueError(f"Unknown: {vision_type}")
 
 
-# ---------------------------------------------------------------------------
-# VLM Model
-# ---------------------------------------------------------------------------
-
-
 class VLConfig:
     def __init__(
         self,
@@ -284,26 +239,21 @@ class VLMModel(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.cfg = config
-
         self.vision_encoder = build_encoder(
             config.vision_type, config.vision_embed_dim, config.img_size
         )
         self.num_img_tokens = self.vision_encoder.num_patches + 1
-
         self.token_emb = nn.Embedding(config.vocab_size, config.n_embd)
         self.img_proj = nn.Linear(config.vision_embed_dim, config.n_embd)
-
         self.pos_emb = nn.Parameter(
             torch.zeros(1, config.context_len + self.num_img_tokens, config.n_embd)
         )
         nn.init.normal_(self.pos_emb, std=0.02)
-
         self.blocks = nn.ModuleList(
             [TransformerBlock(config) for _ in range(config.n_layer)]
         )
         self.norm = nn.RMSNorm(config.n_embd)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-
         self.x0_scale = nn.Parameter(torch.tensor(0.1))
         self._init_weights()
 
@@ -316,26 +266,19 @@ class VLMModel(nn.Module):
 
     def forward(self, images, token_ids, labels=None):
         B, T = token_ids.size()
-
         img_feats = self.vision_encoder(images)
         img_emb = self.img_proj(img_feats)
-
         tok_emb = self.token_emb(token_ids)
-
         seq_len = T + self.num_img_tokens
         x = torch.cat([img_emb, tok_emb], dim=1)
-
         pos = self.pos_emb[:, :seq_len]
         x = x + pos
-
         x0 = x
         for blk in self.blocks:
             x = blk(x)
             x = x + self.x0_scale * x0
-
         x = self.norm(x)
         logits = self.lm_head(x[:, self.num_img_tokens :, :])
-
         if labels is not None:
             loss = F.cross_entropy(
                 logits.reshape(-1, self.cfg.vocab_size),
@@ -366,11 +309,6 @@ class TransformerBlock(nn.Module):
         return x
 
 
-# ---------------------------------------------------------------------------
-# Tokenizer wrapper
-# ---------------------------------------------------------------------------
-
-
 class VLTokenizer:
     def __init__(self, base_tok):
         self.base = base_tok
@@ -390,39 +328,29 @@ class VLTokenizer:
         )
 
 
-# ---------------------------------------------------------------------------
-# Training
-# ---------------------------------------------------------------------------
-
-
 def collate_fn(batch, tokenizer, max_len=128):
     texts = [b[1] for b in batch]
     imgs = torch.stack([b[0] for b in batch])
-
     ids = [tokenizer.encode(t, max_len=max_len - 1) for t in texts]
     max_batch_len = max(len(i) for i in ids)
-
     padded = torch.full((len(ids), max_batch_len), tokenizer.pad_id, dtype=torch.long)
     for i, seq in enumerate(ids):
         padded[i, : len(seq)] = torch.tensor(seq)
-
     labels = padded.clone()
     labels[padded == tokenizer.pad_id] = -1
-
     return imgs, padded, labels
 
 
-def train_vlm(
-    vision_type="cnn",
+def train_vlm_finetune(
+    vision_type,
     n_layer=4,
     n_embd=256,
     vision_dim=256,
     lr=1e-4,
+    vision_lr=1e-5,
     epochs=20,
     batch_size=8,
     save_dir=None,
-    freeze_vision=False,
-    vision_lr=None,
 ):
     from prepare import Tokenizer
 
@@ -438,7 +366,6 @@ def train_vlm(
     )
 
     tokenizer = VLTokenizer(Tokenizer.from_directory())
-    print(f"Tokenizer vocab: {tokenizer.base.get_vocab_size()}")
 
     ds = SpaceVLMDataset(split="train", img_size=cfg.img_size)
     train_loader = DataLoader(
@@ -451,40 +378,18 @@ def train_vlm(
 
     model = VLMModel(cfg).to(device)
 
-    if freeze_vision:
-        for p in model.vision_encoder.parameters():
-            p.requires_grad = False
-        model.vision_encoder.eval()
-        trainable_params = [p for p in model.parameters() if p.requires_grad]
-        frozen_vision = True
-    else:
-        vision_lr = vision_lr or lr
-        trainable_params = list(model.parameters())
+    vis_ids = {id(p) for p in model.vision_encoder.parameters()}
+    param_groups = [
+        {
+            "params": [p for p in model.parameters() if id(p) in vis_ids],
+            "lr": vision_lr,
+        },
+        {"params": [p for p in model.parameters() if id(p) not in vis_ids], "lr": lr},
+    ]
+    optimizer = torch.optim.AdamW(param_groups, weight_decay=0.1, betas=(0.9, 0.95))
 
     nparams = sum(p.numel() for p in model.parameters())
-    trainable_nparams = sum(p.numel() for p in trainable_params)
-    mode_tag = "frozen" if freeze_vision else "finetune"
-    print(
-        f"[{vision_type}][{mode_tag}] Total: {nparams:,} params, trainable: {trainable_nparams:,}"
-    )
-
-    if freeze_vision:
-        optimizer = torch.optim.AdamW(
-            trainable_params, lr=lr, weight_decay=0.1, betas=(0.9, 0.95)
-        )
-    else:
-        vis_ids = {id(p) for p in model.vision_encoder.parameters()}
-        param_groups = [
-            {
-                "params": [p for p in model.parameters() if id(p) in vis_ids],
-                "lr": vision_lr,
-            },
-            {
-                "params": [p for p in model.parameters() if id(p) not in vis_ids],
-                "lr": lr,
-            },
-        ]
-        optimizer = torch.optim.AdamW(param_groups, weight_decay=0.1, betas=(0.9, 0.95))
+    print(f"[{vision_type}][finetune] Total: {nparams:,} params")
 
     if save_dir is None:
         save_dir = os.path.expanduser("~/.cache/autoresearch/vision_checkpoints_ft")
@@ -492,6 +397,7 @@ def train_vlm(
 
     save_every = max(1, epochs // 5)
     best_loss = float("inf")
+    all_params = list(model.parameters())
 
     for epoch in range(epochs):
         model.train()
@@ -507,7 +413,7 @@ def train_vlm(
 
             optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)
+            torch.nn.utils.clip_grad_norm_(all_params, 1.0)
             optimizer.step()
 
             total_loss += loss.item()
@@ -518,30 +424,28 @@ def train_vlm(
 
         if avg_loss < best_loss:
             best_loss = avg_loss
-            ckpt = os.path.join(save_dir, f"best_{mode_tag}_{vision_type}.pt")
+            ckpt = os.path.join(save_dir, f"best_finetune_{vision_type}.pt")
             torch.save(
                 {
                     "epoch": epoch,
                     "model": model.state_dict(),
                     "loss": best_loss,
                     "cfg": dict(vars(cfg)),
-                    "freeze_vision": freeze_vision,
+                    "freeze_vision": False,
                 },
                 ckpt,
             )
             print(f"  -> Saved best: {ckpt}")
 
         if epoch % save_every == 0 or epoch == epochs - 1:
-            ckpt = os.path.join(
-                save_dir, f"epoch{epoch:02d}_{mode_tag}_{vision_type}.pt"
-            )
+            ckpt = os.path.join(save_dir, f"epoch{epoch:02d}_finetune_{vision_type}.pt")
             torch.save(
                 {
                     "epoch": epoch,
                     "model": model.state_dict(),
                     "loss": avg_loss,
                     "cfg": dict(vars(cfg)),
-                    "freeze_vision": freeze_vision,
+                    "freeze_vision": False,
                 },
                 ckpt,
             )
@@ -550,17 +454,16 @@ def train_vlm(
         gc.collect()
         torch.cuda.empty_cache()
 
-    print(f"\n[{vision_type}][{mode_tag}] Best loss: {best_loss:.4f}")
-    return best_loss, model
+    print(f"\n[{vision_type}][finetune] Best loss: {best_loss:.4f}")
+    return best_loss
 
 
 def main():
     print("=" * 60)
-    print("Vision-Language Training: Freeze vs Fine-tune Experiment")
+    print("Finetune Vision Encoders (Part 2 of Freeze vs Finetune)")
     print("=" * 60)
 
     results = {}
-
     configs = [
         ("cnn", 4, 256, 256),
         ("vit", 4, 256, 256),
@@ -568,64 +471,51 @@ def main():
         ("hybrid", 4, 256, 256),
     ]
 
+    frozen_results = {
+        "cnn": 0.9178,
+        "vit": 1.1389,
+        "resnet": 0.8873,
+        "hybrid": 0.9739,
+    }
+
     for vision_type, n_layer, n_embd, vision_dim in configs:
-        for freeze in [True, False]:
-            mode = "frozen" if freeze else "finetune"
-            key = f"{vision_type}_{mode}"
-            print(f"\n{'=' * 60}")
-            print(f"Training: {vision_type} | mode={mode}")
-            print(f"{'=' * 60}")
-            try:
-                loss, model = train_vlm(
-                    vision_type=vision_type,
-                    n_layer=n_layer,
-                    n_embd=n_embd,
-                    vision_dim=vision_dim,
-                    lr=1e-4,
-                    vision_lr=1e-5,
-                    epochs=20,
-                    batch_size=8,
-                    freeze_vision=freeze,
-                )
-                results[key] = {
-                    "loss": loss,
-                    "status": "ok",
-                    "mode": mode,
-                    "encoder": vision_type,
-                }
-            except Exception as e:
-                print(f"FAILED: {e}")
-                results[key] = {
-                    "loss": float("inf"),
-                    "status": f"error: {e}",
-                    "mode": mode,
-                    "encoder": vision_type,
-                }
+        print(f"\n{'=' * 60}")
+        print(f"Finetuning: {vision_type}")
+        print(f"{'=' * 60}")
+        try:
+            loss = train_vlm_finetune(
+                vision_type=vision_type,
+                n_layer=n_layer,
+                n_embd=n_embd,
+                vision_dim=vision_dim,
+                lr=1e-4,
+                vision_lr=1e-5,
+                epochs=20,
+                batch_size=8,
+            )
+            results[vision_type] = {
+                "finetune": loss,
+                "frozen": frozen_results[vision_type],
+            }
+        except Exception as e:
+            print(f"FAILED: {e}")
+            results[vision_type] = {
+                "finetune": float("inf"),
+                "frozen": frozen_results[vision_type],
+            }
 
     print("\n" + "=" * 60)
-    print("RESULTS SUMMARY")
+    print("FINAL COMPARISON: Frozen vs Finetune")
     print("=" * 60)
-
-    frozen = [(k, v) for k, v in results.items() if v["mode"] == "frozen"]
-    finetune = [(k, v) for k, v in results.items() if v["mode"] == "finetune"]
-
-    print("\n--- FROZEN VISION ---")
-    for k, v in sorted(frozen, key=lambda x: x[1]["loss"]):
-        print(f"  {k:25s}: loss={v['loss']:.4f} [{v['status']}]")
-
-    print("\n--- FINETUNE VISION ---")
-    for k, v in sorted(finetune, key=lambda x: x[1]["loss"]):
-        print(f"  {k:25s}: loss={v['loss']:.4f} [{v['status']}]")
-
-    print("\n--- COMPARISON ---")
-    for encoder, _, _, _ in configs:
-        f_loss = results.get(f"{encoder}_frozen", {}).get("loss", float("inf"))
-        ft_loss = results.get(f"{encoder}_finetune", {}).get("loss", float("inf"))
-        delta = f_loss - ft_loss
-        winner = "finetune" if delta > 0 else "frozen"
-        print(
-            f"  {encoder:10s}: frozen={f_loss:.4f}  finetune={ft_loss:.4f}  delta={delta:+.4f}  ({winner} wins)"
-        )
+    print(f"{'Encoder':<10} {'Frozen':<10} {'Finetune':<10} {'Delta':<10} {'Winner'}")
+    print("-" * 55)
+    for vt in ["resnet", "cnn", "hybrid", "vit"]:
+        fr = results.get(vt, {}).get("frozen", float("inf"))
+        ft = results.get(vt, {}).get("finetune", float("inf"))
+        delta = fr - ft
+        winner = "finetune" if ft < fr else "frozen"
+        delta_str = f"{delta:+.4f}" if ft < float("inf") else "N/A"
+        print(f"{vt:<10} {fr:<10.4f} {ft:<10.4f} {delta_str:<10} {winner}")
 
 
 if __name__ == "__main__":
