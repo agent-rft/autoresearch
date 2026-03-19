@@ -10,10 +10,10 @@ os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 
 import gc
-import math
-import time
 import io
 import math
+import time
+import numpy as np
 from PIL import Image
 import requests
 
@@ -75,12 +75,12 @@ class SpaceVLMDataset(Dataset):
                 img = Image.open(io.BytesIO(img)).convert("RGB")
             except:
                 return torch.zeros(3, self.img_size, self.img_size)
+        if img.mode != "RGB":
+            img = img.convert("RGB")
         if img.size != (self.img_size, self.img_size):
             img = img.resize((self.img_size, self.img_size), Image.BILINEAR)
-        img_arr = torch.ByteTensor(torch.ByteStorage.from_buffer(img.tobytes()))
-        img_arr = (
-            img_arr.view(img.size[1], img.size[0], 3).permute(2, 0, 1).float() / 255.0
-        )
+        np_img = np.array(img)
+        img_arr = torch.from_numpy(np_img).permute(2, 0, 1).float() / 255.0
         mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
         std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
         return (img_arr - mean) / std
@@ -126,9 +126,7 @@ class CNNEncoder(nn.Module):
         self.net = nn.Sequential(*layers)
         self.pool = nn.AdaptiveAvgPool2d((4, 4))
         self.proj = nn.Sequential(
-            nn.Linear(512 * 16, embed_dim * 2),
-            nn.SiLU(),
-            nn.Linear(embed_dim * 2, embed_dim),
+            nn.Linear(512, embed_dim),
         )
         self.num_patches = 16
         self.cls = nn.Parameter(torch.zeros(1, 1, embed_dim))
@@ -136,7 +134,9 @@ class CNNEncoder(nn.Module):
 
     def forward(self, x):
         x = self.net(x)
-        x = self.pool(x).flatten(2).transpose(1, 2)
+        x = self.pool(x)
+        B, C, H, W = x.shape
+        x = x.flatten(2).transpose(1, 2)
         x = self.proj(x)
         cls = self.cls.expand(x.size(0), -1, -1)
         return torch.cat([cls, x], dim=1)
@@ -504,7 +504,7 @@ def train_vlm(
             torch.save(
                 {
                     "epoch": epoch,
-                    "model": model.state(),
+                    "model": model.state_dict(),
                     "loss": avg_loss,
                     "cfg": dict(vars(cfg)),
                 },
