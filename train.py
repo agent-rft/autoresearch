@@ -233,7 +233,6 @@ class GPT(nn.Module):
             torch.nn.init.uniform_(block.attn.c_k.weight, -s, s)
             torch.nn.init.uniform_(block.attn.c_v.weight, -s, s)
             torch.nn.init.zeros_(block.attn.c_proj.weight)
-            torch.nn.init.zeros_(block.attn.c_proj.weight)
             if isinstance(block.mlp, MoELayer):
                 torch.nn.init.zeros_(block.mlp.router.weight)
                 for expert in block.mlp.experts:
@@ -569,12 +568,6 @@ class MuonAdamW(torch.optim.Optimizer):
         params = group["params"]
         if not params:
             return
-        none_grad = [f"{i}:{p.shape}" for i, p in enumerate(params) if p.grad is None]
-        if none_grad:
-            print(f"WARNING: None grads: {none_grad}")
-        params = [p for p in params if p.grad is not None]
-        if not params:
-            return
         p = params[0]
         state = self.state[p]
         num_params = len(params)
@@ -757,6 +750,10 @@ while True:
         loss = loss / grad_accum_steps
         loss.backward()
         x, y, epoch = next(train_loader)
+
+    for p in model.parameters():
+        if p.grad is None and p.requires_grad:
+            p.grad = torch.zeros_like(p)
 
     # Progress and schedules
     progress = min(total_training_time / TIME_BUDGET, 1.0)
