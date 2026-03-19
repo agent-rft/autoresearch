@@ -57,10 +57,14 @@ class VLConfig:
 class LightweightTokenizer:
     def __init__(self, base_tokenizer):
         self.base = base_tokenizer
-        self.img_token = 2
+        self.bos_id = base_tokenizer.get_bos_token_id()
+        self.eos_id = 0
+        self.vocab_size = base_tokenizer.get_vocab_size()
 
-    def encode(self, text):
+    def encode(self, text, add_special_tokens=True):
         ids = self.base.encode(text)
+        if add_special_tokens:
+            ids = [self.bos_id] + ids + [self.eos_id]
         return ids
 
     def decode(self, ids):
@@ -433,15 +437,8 @@ class VLMModel(nn.Module):
         B = images.size(0)
 
         prompt = "Describe this space image:"
-        input_ids = tokenizer.encode(prompt)
-        input_ids = [
-            tokenizer.base.eod_id
-            if isinstance(tokenizer.base.eod_id, int)
-            and tokenizer.base.eod_id is not None
-            else 3
-        ] * (len(input_ids) // 4)
-
-        input_ids = torch.tensor([input_ids], device=device).expand(B, -1)
+        prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
+        input_ids = torch.tensor([prompt_ids], device=device).expand(B, -1)
 
         for _ in range(max_new_tokens):
             logits = self.forward(images, input_ids)
@@ -450,11 +447,7 @@ class VLMModel(nn.Module):
             next_token = torch.multinomial(probs, 1)
             input_ids = torch.cat([input_ids, next_token], dim=1)
 
-            if (
-                next_token.item() == tokenizer.base.eod_id
-                if hasattr(tokenizer.base, "eod_id")
-                else 0
-            ):
+            if next_token.item() == tokenizer.bos_id:
                 break
 
         return input_ids
@@ -530,16 +523,18 @@ def train_epoch(model, loader, optimizer, tokenizer, epoch, config):
 
         for text in texts:
             ids = tokenizer.encode(text)
-            input_ids.append([tokenizer.base.eod_id] + ids + [tokenizer.base.eod_id])
+            input_ids.append(ids)
             max_len = max(max_len, len(input_ids[-1]))
 
         for i in range(len(input_ids)):
             while len(input_ids[i]) < max_len:
                 input_ids[i].append(-1)
+            if len(input_ids[i]) > config.context_len:
+                input_ids[i] = input_ids[i][: config.context_len]
 
         input_ids = torch.tensor(input_ids, device=device)
         tgt = input_ids.clone()
-        tgt[input_ids == tokenizer.base.eod_id] = -1
+        tgt[input_ids == -1] = -1
 
         logits = model(images, input_ids[:, :-1], tgt[:, 1:])
 
@@ -580,9 +575,7 @@ def evaluate(model, loader, tokenizer, config):
 
             for text in texts:
                 ids = tokenizer.encode(text)
-                input_ids.append(
-                    [tokenizer.base.eod_id] + ids + [tokenizer.base.eod_id]
-                )
+                input_ids.append([tokenizer.bos_id] + ids + [tokenizer.bos_id])
                 max_len = max(max_len, len(input_ids[-1]))
 
             for i in range(len(input_ids)):
@@ -591,7 +584,7 @@ def evaluate(model, loader, tokenizer, config):
 
             input_ids = torch.tensor(input_ids, device=device)
             tgt = input_ids.clone()
-            tgt[input_ids == tokenizer.base.eod_id] = -1
+            tgt[input_ids == -1] = -1
 
             logits = model(images, input_ids[:, :-1], tgt[:, 1:])
 
