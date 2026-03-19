@@ -55,6 +55,8 @@ def norm(x):
 
 def has_ve(layer_idx, n_layer):
     """Returns True if layer should have Value Embedding (alternating, last always included)."""
+    if not USE_VALUE_EMBEDS:
+        return False
     return layer_idx % 2 == (n_layer - 1) % 2
 
 
@@ -579,6 +581,7 @@ class MuonAdamW(torch.optim.Optimizer):
 ASPECT_RATIO = 64  # model_dim = depth * ASPECT_RATIO
 HEAD_DIM = 128  # target head dimension for attention
 WINDOW_PATTERN = "SSSL"  # sliding window pattern: L=full, S=half context
+USE_VALUE_EMBEDS = False
 
 # Optimization
 TOTAL_BATCH_SIZE = 2**19  # ~524K tokens per optimizer step
