@@ -464,7 +464,6 @@ polar_express_coeffs = [
 ]
 
 
-@torch.compile(dynamic=False, fullgraph=True, backend="eager")
 def adamw_step_fused(
     p, grad, exp_avg, exp_avg_sq, step_t, lr_t, beta1_t, beta2_t, eps_t, wd_t
 ):
@@ -478,7 +477,6 @@ def adamw_step_fused(
     p.add_(exp_avg / denom, alpha=-step_size)
 
 
-@torch.compile(dynamic=False, fullgraph=True, backend="eager")
 def muon_step_fused(
     stacked_grads,
     stacked_params,
@@ -714,7 +712,7 @@ optimizer = model.setup_optimizer(
     weight_decay=WEIGHT_DECAY,
 )
 
-model = torch.compile(model, dynamic=False, backend="eager")
+# model = torch.compile(model, dynamic=False, backend="eager")
 
 train_loader = make_dataloader(tokenizer, DEVICE_BATCH_SIZE, MAX_SEQ_LEN, "train")
 x, y, epoch = next(train_loader)  # prefetch first batch
