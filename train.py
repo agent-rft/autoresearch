@@ -21,11 +21,15 @@ import torch.nn.functional as F
 from kernels import get_kernel
 
 cap = torch.cuda.get_device_capability()
-# varunneal's FA3 is Hopper only, use kernels-community on non-Hopper GPUs
 repo = (
     "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
 )
-fa3 = get_kernel(repo).flash_attn_interface
+try:
+    fa3 = get_kernel(repo).flash_attn_interface
+    HAS_FA3 = True
+except Exception:
+    HAS_FA3 = False
+    print("Flash attention unavailable, using scaled_dot_product_attention fallback")
 
 from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader, evaluate_bpb
 
@@ -99,7 +103,23 @@ class CausalSelfAttention(nn.Module):
         q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
         q, k = norm(q), norm(k)
 
-        y = fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
+        if HAS_FA3:
+            y = fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
+        else:
+            attn_mask = None
+            w, _ = window_size
+            if w > 0 and w < T:
+                attn_mask = torch.triu(
+                    torch.ones(T, T, device=x.device, dtype=torch.bool), diagonal=1
+                )
+                causal_mask = torch.tril(
+                    torch.ones(T, T, device=x.device, dtype=torch.bool), diagonal=w - 1
+                )
+                attn_mask = ~(causal_mask & ~attn_mask)
+                attn_mask = attn_mask.unsqueeze(0).unsqueeze(0)
+            y = F.scaled_dot_product_attention(
+                q, k, v, attn_mask=attn_mask, is_causal=False
+            )
         y = y.contiguous().view(B, T, -1)
         y = self.c_proj(y)
         return y
