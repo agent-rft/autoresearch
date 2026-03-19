@@ -421,6 +421,8 @@ def train_vlm(
     epochs=20,
     batch_size=8,
     save_dir=None,
+    freeze_vision=False,
+    vision_lr=None,
 ):
     from prepare import Tokenizer
 
@@ -448,15 +450,44 @@ def train_vlm(
     )
 
     model = VLMModel(cfg).to(device)
-    nparams = sum(p.numel() for p in model.parameters())
-    print(f"[{vision_type}] Model: {nparams:,} params, {nparams / 1e6:.1f}M")
 
-    optimizer = torch.optim.AdamW(
-        model.parameters(), lr=lr, weight_decay=0.1, betas=(0.9, 0.95)
+    if freeze_vision:
+        for p in model.vision_encoder.parameters():
+            p.requires_grad = False
+        model.vision_encoder.eval()
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
+        frozen_vision = True
+    else:
+        vision_lr = vision_lr or lr
+        trainable_params = list(model.parameters())
+
+    nparams = sum(p.numel() for p in model.parameters())
+    trainable_nparams = sum(p.numel() for p in trainable_params)
+    mode_tag = "frozen" if freeze_vision else "finetune"
+    print(
+        f"[{vision_type}][{mode_tag}] Total: {nparams:,} params, trainable: {trainable_nparams:,}"
     )
 
+    if freeze_vision:
+        optimizer = torch.optim.AdamW(
+            trainable_params, lr=lr, weight_decay=0.1, betas=(0.9, 0.95)
+        )
+    else:
+        param_groups = [
+            {"params": model.vision_encoder.parameters(), "lr": vision_lr},
+            {
+                "params": [
+                    p
+                    for p in model.parameters()
+                    if p not in model.vision_encoder.parameters()
+                ],
+                "lr": lr,
+            },
+        ]
+        optimizer = torch.optim.AdamW(param_groups, weight_decay=0.1, betas=(0.9, 0.95))
+
     if save_dir is None:
-        save_dir = os.path.expanduser("~/.cache/autoresearch/vision_checkpoints")
+        save_dir = os.path.expanduser("~/.cache/autoresearch/vision_checkpoints_ft")
     os.makedirs(save_dir, exist_ok=True)
 
     save_every = max(1, epochs // 5)
@@ -476,7 +507,7 @@ def train_vlm(
 
             optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)
             optimizer.step()
 
             total_loss += loss.item()
@@ -487,26 +518,30 @@ def train_vlm(
 
         if avg_loss < best_loss:
             best_loss = avg_loss
-            ckpt = os.path.join(save_dir, f"best_{vision_type}.pt")
+            ckpt = os.path.join(save_dir, f"best_{mode_tag}_{vision_type}.pt")
             torch.save(
                 {
                     "epoch": epoch,
                     "model": model.state_dict(),
                     "loss": best_loss,
                     "cfg": dict(vars(cfg)),
+                    "freeze_vision": freeze_vision,
                 },
                 ckpt,
             )
             print(f"  -> Saved best: {ckpt}")
 
         if epoch % save_every == 0 or epoch == epochs - 1:
-            ckpt = os.path.join(save_dir, f"epoch{epoch:02d}_{vision_type}.pt")
+            ckpt = os.path.join(
+                save_dir, f"epoch{epoch:02d}_{mode_tag}_{vision_type}.pt"
+            )
             torch.save(
                 {
                     "epoch": epoch,
                     "model": model.state_dict(),
                     "loss": avg_loss,
                     "cfg": dict(vars(cfg)),
+                    "freeze_vision": freeze_vision,
                 },
                 ckpt,
             )
@@ -515,13 +550,13 @@ def train_vlm(
         gc.collect()
         torch.cuda.empty_cache()
 
-    print(f"\n[{vision_type}] Best loss: {best_loss:.4f}")
+    print(f"\n[{vision_type}][{mode_tag}] Best loss: {best_loss:.4f}")
     return best_loss, model
 
 
 def main():
     print("=" * 60)
-    print("Vision-Language Training: Space Multimodal Dataset")
+    print("Vision-Language Training: Freeze vs Fine-tune Experiment")
     print("=" * 60)
 
     results = {}
@@ -534,29 +569,63 @@ def main():
     ]
 
     for vision_type, n_layer, n_embd, vision_dim in configs:
-        print(f"\n{'=' * 60}")
-        print(f"Training: {vision_type} encoder | layers={n_layer} | n_embd={n_embd}")
-        print(f"{'=' * 60}")
-        try:
-            loss, model = train_vlm(
-                vision_type=vision_type,
-                n_layer=n_layer,
-                n_embd=n_embd,
-                vision_dim=vision_dim,
-                lr=1e-4,
-                epochs=20,
-                batch_size=8,
-            )
-            results[vision_type] = {"loss": loss, "status": "ok"}
-        except Exception as e:
-            print(f"FAILED: {e}")
-            results[vision_type] = {"loss": float("inf"), "status": f"error: {e}"}
+        for freeze in [True, False]:
+            mode = "frozen" if freeze else "finetune"
+            key = f"{vision_type}_{mode}"
+            print(f"\n{'=' * 60}")
+            print(f"Training: {vision_type} | mode={mode}")
+            print(f"{'=' * 60}")
+            try:
+                loss, model = train_vlm(
+                    vision_type=vision_type,
+                    n_layer=n_layer,
+                    n_embd=n_embd,
+                    vision_dim=vision_dim,
+                    lr=1e-4,
+                    vision_lr=1e-5,
+                    epochs=20,
+                    batch_size=8,
+                    freeze_vision=freeze,
+                )
+                results[key] = {
+                    "loss": loss,
+                    "status": "ok",
+                    "mode": mode,
+                    "encoder": vision_type,
+                }
+            except Exception as e:
+                print(f"FAILED: {e}")
+                results[key] = {
+                    "loss": float("inf"),
+                    "status": f"error: {e}",
+                    "mode": mode,
+                    "encoder": vision_type,
+                }
 
     print("\n" + "=" * 60)
     print("RESULTS SUMMARY")
     print("=" * 60)
-    for vt, res in sorted(results.items(), key=lambda x: x[1]["loss"]):
-        print(f"  {vt:10s}: loss={res['loss']:.4f} [{res['status']}]")
+
+    frozen = [(k, v) for k, v in results.items() if v["mode"] == "frozen"]
+    finetune = [(k, v) for k, v in results.items() if v["mode"] == "finetune"]
+
+    print("\n--- FROZEN VISION ---")
+    for k, v in sorted(frozen, key=lambda x: x[1]["loss"]):
+        print(f"  {k:25s}: loss={v['loss']:.4f} [{v['status']}]")
+
+    print("\n--- FINETUNE VISION ---")
+    for k, v in sorted(finetune, key=lambda x: x[1]["loss"]):
+        print(f"  {k:25s}: loss={v['loss']:.4f} [{v['status']}]")
+
+    print("\n--- COMPARISON ---")
+    for encoder, _, _, _ in configs:
+        f_loss = results.get(f"{encoder}_frozen", {}).get("loss", float("inf"))
+        ft_loss = results.get(f"{encoder}_finetune", {}).get("loss", float("inf"))
+        delta = f_loss - ft_loss
+        winner = "finetune" if delta > 0 else "frozen"
+        print(
+            f"  {encoder:10s}: frozen={f_loss:.4f}  finetune={ft_loss:.4f}  delta={delta:+.4f}  ({winner} wins)"
+        )
 
 
 if __name__ == "__main__":
