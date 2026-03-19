@@ -166,19 +166,23 @@ class MoELayer(nn.Module):
         top_weights = top_weights.to(x.dtype)
 
         out = torch.zeros_like(flat_x)
+        top1_idx = top_indices[:, 0]
+        w1 = top_weights[:, 0]
         for i, expert in enumerate(self.experts):
-            mask = (top_indices == i).any(dim=-1)
+            mask = top1_idx == i
             if mask.any():
-                sel_w = torch.zeros(
-                    B * T, self.num_experts, dtype=top_weights.dtype, device=x.device
+                out[mask] += (w1 * mask.to(x.dtype)).unsqueeze(-1) * expert(
+                    flat_x[mask]
                 )
-                for j in range(self.num_selected):
-                    sel_w.scatter_add_(
-                        1,
-                        top_indices[:, j].unsqueeze(1),
-                        (top_weights[:, j] * (top_indices[:, j] == i)).unsqueeze(1),
+        if self.num_selected > 1:
+            top2_idx = top_indices[:, 1]
+            w2 = top_weights[:, 1]
+            for i, expert in enumerate(self.experts):
+                mask = top2_idx == i
+                if mask.any():
+                    out[mask] += (w2 * mask.to(x.dtype)).unsqueeze(-1) * expert(
+                        flat_x[mask]
                     )
-                out[mask] += expert(flat_x[mask]) * sel_w[mask]
 
         out += self.shared_expert(x).view(B * T, C)
         return out.view(B, T, C)
