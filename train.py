@@ -464,7 +464,7 @@ polar_express_coeffs = [
 ]
 
 
-@torch.compile(dynamic=False, fullgraph=True)
+@torch.compile(dynamic=False, fullgraph=True, backend="eager")
 def adamw_step_fused(
     p, grad, exp_avg, exp_avg_sq, step_t, lr_t, beta1_t, beta2_t, eps_t, wd_t
 ):
@@ -478,7 +478,7 @@ def adamw_step_fused(
     p.add_(exp_avg / denom, alpha=-step_size)
 
 
-@torch.compile(dynamic=False, fullgraph=True)
+@torch.compile(dynamic=False, fullgraph=True, backend="eager")
 def muon_step_fused(
     stacked_grads,
     stacked_params,
