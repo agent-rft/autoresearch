@@ -27,6 +27,31 @@
 - The `img_proj` layer alone isn't enough to bridge pretrained vision → text space
 - Fine-tuning allows the vision encoder to learn satellite-specific features (ocean textures, cloud patterns, Mars terrain)
 
+## Generation Examples
+
+Tested on space images with prompt prefix "A satellite image of Earth showing the" (truncated from GT caption).
+
+**Finetuned (loss=0.8522):**
+```
+GT:  A satellite image of Earth showing the curvature and scattered clouds over the Atlantic Ocean.
+GEN: A satellite image of Earth showing the the the the the the the the the the the the the the the the...
+     → Severe repetition: model memorized "showing the curvature and scattered clouds over the Atlantic Ocean" 
+       but can't reproduce it from prefix alone. Collapses to repeating "the".
+```
+
+**Frozen (loss=0.8873):**
+```
+GT:  A satellite image of Earth showing the curvature and scattered clouds over the Atlantic Ocean.
+GEN: A satellite image of Earth showing the the the the the the the the the the the the the the the...
+     → Same repetition pattern, slightly more variation before collapse.
+```
+
+**Key observations:**
+- Both models severely overfit on 250 captions — low loss reflects memorization, not generalization
+- When prompted with the beginning of a known caption, models repeat common tokens then collapse
+- Fine-tuned model memorizes captions more precisely; frozen model shows slight word substitutions
+- The dataset is too small (250 samples) for meaningful generalization
+
 ## Checkpoints
 
 All saved to `~/.cache/autoresearch/vision_checkpoints_ft/`:
