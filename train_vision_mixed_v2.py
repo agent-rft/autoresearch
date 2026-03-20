@@ -180,22 +180,78 @@ class WebsiteScreenshotsDataset(Dataset):
         return self._norm(row["image"]), text, "vision"
 
 
-class FineWebTextDataset(Dataset):
-    def __init__(self, split="train", max_samples=2000):
+class DolmaTextDataset(Dataset):
+    def __init__(self, max_samples=3000):
         from datasets import load_dataset
 
-        self.ds = load_dataset(
-            "Lambent/creative-writing-2048-fineweb-edu-sample", split=split
-        )
+        self.ds = load_dataset("CrowdMind/dolma-1m-shuffle", split="train")
         if max_samples:
-            self.ds = self.ds.select(range(min(max_samples, len(self.ds))))
-        print(f"  FineWeb text: {len(self.ds)} samples")
+            ids = np.random.permutation(len(self.ds))[:max_samples].tolist()
+            self.ds = self.ds.select(ids)
+        print(f"  Dolma text: {len(self.ds)} samples")
 
     def __len__(self):
         return len(self.ds)
 
     def __getitem__(self, idx):
         return None, self.ds[idx]["text"], "text"
+
+
+class CodeDataset(Dataset):
+    def __init__(self, max_samples=3000):
+        from datasets import load_dataset
+
+        self.ds = load_dataset("razhan/code-valid", split="train")
+        if max_samples:
+            ids = np.random.permutation(len(self.ds))[:max_samples].tolist()
+            self.ds = self.ds.select(ids)
+        print(f"  Code: {len(self.ds)} samples")
+
+    def __len__(self):
+        return len(self.ds)
+
+    def __getitem__(self, idx):
+        return None, self.ds[idx]["content"], "text"
+
+
+class IntentPretrainDataset(Dataset):
+    def __init__(self, img_size=IMG_SIZE, max_samples=3000):
+        self.img_size = img_size
+        from datasets import load_dataset
+
+        self.ds = load_dataset("hamedrahimi/intent-pretrain", split="train")
+        if max_samples:
+            ids = np.random.permutation(len(self.ds))[:max_samples].tolist()
+            self.ds = self.ds.select(ids)
+        print(f"  Intent Pretrain: {len(self.ds)} samples")
+
+    def _norm(self, img):
+        if not isinstance(img, Image.Image):
+            try:
+                img = Image.open(io.BytesIO(img)).convert("RGB")
+            except:
+                return torch.zeros(3, self.img_size, self.img_size)
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        if img.size != (self.img_size, self.img_size):
+            img = img.resize((self.img_size, self.img_size), Image.BILINEAR)
+        np_img = np.array(img)
+        a = torch.from_numpy(np_img).permute(2, 0, 1).float() / 255.0
+        m = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+        s = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+        return (a - m) / s
+
+    def __len__(self):
+        return len(self.ds)
+
+    def __getitem__(self, idx):
+        row = self.ds[idx]
+        text = row["text"]
+        frames = row["frames"]
+        n_frames = len(frames)
+        mid = n_frames // 2
+        frame = frames[mid]
+        return self._norm(frame), text, "vision"
 
 
 class MixedDataset(Dataset):
@@ -470,7 +526,7 @@ def train_mixed(
     )
 
     tokenizer = VLTokenizer(Tokenizer.from_directory())
-    mixed_ds = MixedDataset(datasets, dataset_weights, epoch_size=4000)
+    mixed_ds = MixedDataset(datasets, dataset_weights, epoch_size=8000)
     print(f"  Mixed epoch size: {len(mixed_ds)}")
 
     train_loader = DataLoader(
@@ -567,30 +623,37 @@ def train_mixed(
 
 def main():
     print("=" * 60)
-    print("Mixed Multimodal Training v2: LaTeX + ScienceQA + Pets + Web + Text")
+    print("Mixed Multimodal Training v2: 7 diverse datasets")
     print("=" * 60)
 
-    latex_ds = LatexOCRDataset(max_samples=3000)
-    sciqa_ds = ScienceQADataset(max_samples=5000)
-    pets_ds = OxfordPetsDataset(max_samples=3000)
+    latex_ds = LatexOCRDataset(max_samples=6000)
+    sciqa_ds = ScienceQADataset(max_samples=10000)
+    pets_ds = OxfordPetsDataset(max_samples=6000)
     web_ds = WebsiteScreenshotsDataset(max_samples=1500)
-    fineweb_ds = FineWebTextDataset(max_samples=2000)
+    intent_ds = IntentPretrainDataset(max_samples=6000)
+    dolma_ds = DolmaTextDataset(max_samples=6000)
+    code_ds = CodeDataset(max_samples=6000)
 
     configs = [
         {
             "name": "v2_balanced",
-            "weights": [1.0, 1.0, 1.0, 1.0, 1.0],
-            "desc": "Equal weights across all 5 datasets",
+            "weights": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            "desc": "Equal weights across all 7 datasets",
         },
         {
             "name": "v2_latex_focus",
-            "weights": [3.0, 1.0, 1.0, 1.0, 1.0],
-            "desc": "LaTeX OCR 3x weight (68K samples available)",
+            "weights": [3.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            "desc": "LaTeX OCR 3x weight",
         },
         {
             "name": "v2_science_focus",
-            "weights": [1.0, 3.0, 1.0, 1.0, 1.0],
-            "desc": "ScienceQA 3x weight (12K samples)",
+            "weights": [1.0, 3.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            "desc": "ScienceQA 3x weight",
+        },
+        {
+            "name": "v2_code_focus",
+            "weights": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 3.0],
+            "desc": "Code 3x weight",
         },
     ]
 
@@ -605,7 +668,15 @@ def main():
         try:
             loss = train_mixed(
                 name=name,
-                datasets=[latex_ds, sciqa_ds, pets_ds, web_ds, fineweb_ds],
+                datasets=[
+                    latex_ds,
+                    sciqa_ds,
+                    pets_ds,
+                    web_ds,
+                    intent_ds,
+                    dolma_ds,
+                    code_ds,
+                ],
                 dataset_weights=weights,
                 vision_type="resnet",
                 n_layer=4,
